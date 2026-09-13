@@ -785,3 +785,54 @@ class TestModelStoreGraph:
         store = ModelStore()
         with pytest.raises(KeyError):
             store.get_graph("nonexistent")
+
+
+class TestUnboundVariableWarnings:
+    """A typo in ORDER BY or SELECT is valid SPARQL and orders or projects nothing."""
+
+    def test_order_by_typo_is_warned(self, sales_model: SemanticModel) -> None:
+        from orionbelt.obsl.sparql import unbound_variable_warnings
+
+        g = export_obsl(sales_model, "t1")
+        query = (
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n"
+            "SELECT ?label WHERE { ?x rdfs:label ?label } ORDER BY ?lal ?label"
+        )
+        assert unbound_variable_warnings(query) == [
+            "ORDER BY ?lal: the variable is never bound, so it orders nothing"
+        ]
+        result = execute_sparql(g, query)
+        assert result.type == "select" and result.results
+        assert result.warnings == [
+            "ORDER BY ?lal: the variable is never bound, so it orders nothing"
+        ]
+
+    def test_projected_typo_is_warned_once(self) -> None:
+        from orionbelt.obsl.sparql import unbound_variable_warnings
+
+        query = (
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n"
+            "SELECT ?label ?lable WHERE { ?x rdfs:label ?label } ORDER BY ?lable"
+        )
+        assert unbound_variable_warnings(query) == [
+            "ORDER BY ?lable: the variable is never bound, so it orders nothing"
+        ]
+
+    def test_bind_optional_and_values_count_as_bound(self) -> None:
+        from orionbelt.obsl.sparql import unbound_variable_warnings
+
+        query = (
+            "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n"
+            "SELECT ?label ?c ?d ?v WHERE { ?x rdfs:label ?label . "
+            "OPTIONAL { ?x rdfs:comment ?c } BIND(STR(?label) AS ?d) "
+            "VALUES ?v { 1 2 } } ORDER BY ?d ?c ?v"
+        )
+        assert unbound_variable_warnings(query) == []
+
+    def test_ask_is_quiet_and_a_broken_query_still_raises(self, sales_model: SemanticModel) -> None:
+        from orionbelt.obsl.sparql import unbound_variable_warnings
+
+        assert unbound_variable_warnings("ASK { ?x ?p ?o }") == []
+        g = export_obsl(sales_model, "t1")
+        with pytest.raises(Exception, match="(?i)expected|parse|syntax"):
+            execute_sparql(g, "SELECT WHERE ?broken")

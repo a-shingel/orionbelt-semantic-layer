@@ -48,9 +48,12 @@ from orionbelt.ui.handlers import (
     _resolve_execution_dialect,
     clear_filters_and_execute,
     compile_sql,
+    evaluate_all_rules_ui,
+    evaluate_rule_ui,
     execute_query,
     filter_and_execute,
     filter_chip_update,
+    load_rules,
     model_jump_targets,
     run_sparql,
     sort_and_execute,
@@ -94,8 +97,11 @@ __all__ = [
     "_load_example_model",
     "_render_ontology_graph",
     "_resolve_execution_dialect",
+    "load_rules",
     "run_sparql",
     "sparql_example_query",
+    "evaluate_all_rules_ui",
+    "evaluate_rule_ui",
     "_warn_if_auth_required_without_key",
     "compile_sql",
     "create_blocks",
@@ -462,19 +468,73 @@ _CSS = """\
   overflow: auto;
   border-radius: 8px;
 }
+/* ── Business Rules tab: same viewport-relative sizing as the SPARQL results ── */
+/* The rule list has no toolbar (it is a listing); the findings keep Gradio's
+   copy + fullscreen buttons, pulled up tight under the status line. */
+.rules-table .header-row { display: none !important; }
+.findings-table .header-row { margin-bottom: 0 !important; min-height: 0 !important; }
+/* The rule list keeps a fixed height (about seven rows) and scrolls inside
+   itself when a model has more, so the controls below never move. */
+.rules-table .table-wrap, .rules-table .virtual-table-viewport {
+  max-height: 320px !important;
+}
+/* Same rule for the findings: below the rule list, controls and toolbar (~655px). */
+.findings-table .table-wrap, .findings-table .virtual-table-viewport {
+  max-height: max(196px, calc(100dvh - 705px)) !important;
+}
+.rules-table .table-wrap, .findings-table .table-wrap {
+  overflow: auto !important; min-height: 100px;
+}
+#ob-rules-stats { margin-bottom: -6px; }
+#ob-rules-status { margin-bottom: -14px; }
+/* ── SPARQL tab: the ACE editor and its hidden bridge textbox ── */
+#ob-sparql-ace { height: 240px; border: 1px solid var(--border-color-primary, #555);
+  border-radius: 8px; font-family: Menlo, Consolas, monospace; }
+#ob-sparql-bridge { display: none !important; }
+/* The caret is a 2px left border that Gradio's stylesheet zeroes; restore it
+   in the text colour so it shows in both modes. */
+#ob-sparql-ace .ace_cursor { border-left: 2px solid currentColor !important; }
+/* Token palette. Gradio paints every descendant of an HTML component with
+   the body text colour (".prose *"), at a specificity ACE's theme rules lose
+   to, so the colours are ours, scoped and !important: purple keywords, teal
+   variables, blue prefixed names, green IRIs and strings, grey comments. The
+   ACE theme still supplies background, gutter and selection. */
+#ob-sparql-ace .ace_line, #ob-sparql-ace .ace_gutter-cell,
+#ob-sparql-ace .ace_paren, #ob-sparql-ace .ace_punctuation { color: #383a42 !important; }
+#ob-sparql-ace .ace_gutter-cell { color: #9d9d9f !important; }
+#ob-sparql-ace .ace_keyword { color: #a626a4 !important; }
+#ob-sparql-ace .ace_variable { color: #0184bc !important; }
+#ob-sparql-ace .ace_entity { color: #4078f2 !important; }
+#ob-sparql-ace .ace_support { color: #2b8a8a !important; }
+#ob-sparql-ace .ace_string, #ob-sparql-ace .ace_constant { color: #50a14f !important; }
+#ob-sparql-ace .ace_comment { color: #a0a1a7 !important; font-style: italic; }
+#ob-sparql-ace .ace_invalid { color: #e45649 !important; }
+.dark #ob-sparql-ace .ace_line, .dark #ob-sparql-ace .ace_paren,
+.dark #ob-sparql-ace .ace_punctuation { color: #c5c8c6 !important; }
+.dark #ob-sparql-ace .ace_gutter-cell { color: #6b7280 !important; }
+.dark #ob-sparql-ace .ace_keyword { color: #c678dd !important; }
+.dark #ob-sparql-ace .ace_variable { color: #56b6c2 !important; }
+.dark #ob-sparql-ace .ace_entity { color: #61afef !important; }
+.dark #ob-sparql-ace .ace_support { color: #e5c07b !important; }
+.dark #ob-sparql-ace .ace_string, .dark #ob-sparql-ace .ace_constant { color: #98c379 !important; }
+.dark #ob-sparql-ace .ace_comment { color: #7f848e !important; }
+.dark #ob-sparql-ace .ace_invalid { color: #e06c75 !important; }
 /* ── SPARQL tab: results sized to the viewport so the table always ends above
    the fold and scrolls inside itself. Gradio 6 scrolls the inner
    .virtual-table-viewport (capped by max_height, a fixed pixel count that ran
    off the bottom of shorter windows), so the cap goes on both wrappers. The
-   copy/fullscreen toolbar row is hidden: it only added a gap under the status
-   line, which already carries the row count. ── */
-.sparql-table .header-row { display: none !important; }
+   copy + fullscreen toolbar stays, like the query results, pulled up tight
+   under the status line. ── */
+.sparql-table .header-row { margin-bottom: 0 !important; min-height: 0 !important; }
+/* Fill what is left of the window below the editor and the toolbar (the table
+   top sits at ~610px),
+   never less than a few rows: a tall window shows more, a short one scrolls. */
 .sparql-table .table-wrap,
 .sparql-table .virtual-table-viewport {
-  max-height: calc(100dvh - 540px) !important;
+  max-height: max(220px, calc(100dvh - 660px)) !important;
 }
 .sparql-table .table-wrap { overflow: auto !important; min-height: 140px; }
-#ob-sparql-status { margin-bottom: -6px; }
+#ob-sparql-status { margin-bottom: -14px; }
 .ob-cb-do label span::before { content: '● '; color: #9E9E9E; }
 .ob-cb-dim label span::before { content: '● '; color: #4CAF50; }
 .ob-cb-meas label span::before { content: '● '; color: #2196F3; }
@@ -1211,6 +1271,94 @@ def _mermaid_head() -> str:
 """
 
 
+#: The SPARQL editor. Gradio's Code component is CodeMirror with a fixed set of
+#: languages and no way to add one, so the SPARQL tab hosts an ACE editor (the
+#: one the ontology builder uses) in a plain div and bridges its text into a
+#: hidden Gradio textbox that the Run button reads. Everything ACE needs is
+#: inlined from the vendored bundle, the same way mermaid is.
+def _ace_head() -> str:
+    """A ``<head>`` fragment that installs ACE and the SPARQL editor glue."""
+    from orionbelt.ui.rendering import _get_ace_b64
+
+    return f"""
+<script>
+(function () {{
+  var bytes = Uint8Array.from(atob("{_get_ace_b64()}"), function (c) {{
+    return c.charCodeAt(0);
+  }});
+  var el = document.createElement("script");
+  el.textContent = new TextDecoder("utf-8").decode(bytes);
+  document.head.appendChild(el);
+
+  var editor = null;
+  function bridgeInput() {{
+    var host = document.getElementById("ob-sparql-bridge");
+    return host ? (host.querySelector("textarea") || host.querySelector("input")) : null;
+  }}
+  function isDark() {{
+    return document.documentElement.classList.contains("dark")
+      || document.body.classList.contains("dark");
+  }}
+  function applyTheme() {{
+    if (editor) editor.setTheme(isDark() ? "ace/theme/tomorrow_night" : "ace/theme/textmate");
+  }}
+  function pushToBridge() {{
+    var ta = bridgeInput();
+    if (!ta || !editor) return;
+    var value = editor.getValue();
+    if (ta.value === value) return;
+    ta.value = value;
+    ta.dispatchEvent(new Event("input", {{ bubbles: true }}));
+  }}
+  window.__obSparql = {{
+    // Create the editor once its container is on screen (ACE measures the
+    // element), seeded from the bridge; on later calls just re-measure.
+    ensure: function () {{
+      var container = document.getElementById("ob-sparql-ace");
+      if (!container || !window.ace) return false;
+      if (!editor) {{
+        editor = window.ace.edit(container, {{
+          mode: "ace/mode/sparql",
+          showPrintMargin: false,
+          fontSize: 13,
+          tabSize: 2,
+          useSoftTabs: true,
+          wrap: true,
+        }});
+        var ta = bridgeInput();
+        editor.setValue(ta ? ta.value : "", -1);
+        var timer = null;
+        editor.session.on("change", function () {{
+          clearTimeout(timer);
+          timer = setTimeout(pushToBridge, 150);
+        }});
+        applyTheme();
+        new MutationObserver(applyTheme).observe(document.documentElement, {{
+          attributes: true, attributeFilter: ["class"]
+        }});
+        new MutationObserver(applyTheme).observe(document.body, {{
+          attributes: true, attributeFilter: ["class"]
+        }});
+      }}
+      editor.resize();
+      return true;
+    }},
+    // The example dropdown writes the query into the bridge through Python;
+    // this copies it into the editor.
+    pull: function () {{
+      if (!window.__obSparql.ensure()) return;
+      var ta = bridgeInput();
+      if (ta && editor.getValue() !== ta.value) editor.setValue(ta.value, -1);
+    }},
+    // Editor text goes to the bridge on every change (debounced); the Run
+    // button flushes once more so a keystroke in the last 150 ms is not lost.
+    flush: pushToBridge,
+  }};
+}})();
+</script>
+"""
+
+
 def frontend_assets(head_html: str | None = None) -> dict[str, str]:
     """The css/js/head every way of serving this app has to pass along.
 
@@ -1221,8 +1369,8 @@ def frontend_assets(head_html: str | None = None) -> dict[str, str]:
     the constructor it reaches only whichever mode happens to look there.
     """
     assets = {"css": _CSS, "js": _DARK_MODE_INIT_JS}
-    mermaid = _mermaid_head()
-    assets["head"] = f"{head_html}\n{mermaid}" if head_html else mermaid
+    vendored = _mermaid_head() + _ace_head()
+    assets["head"] = f"{head_html}\n{vendored}" if head_html else vendored
     return assets
 
 
@@ -1613,6 +1761,15 @@ def create_blocks(
                 # 140 was narrower than "Validate Model" renders, so it broke
                 # across two lines.
                 with gr.Row(equal_height=True):
+                    # Validate first: it is the step before compiling and
+                    # executing, and the row reads left to right in that order.
+                    validate_btn = gr.Button(
+                        "Validate Model",
+                        variant="primary",
+                        scale=0,
+                        min_width=160,
+                        elem_classes=["action-btn", "green-btn"],
+                    )
                     compile_btn = gr.Button(
                         "Compile SQL",
                         variant="primary",
@@ -1627,13 +1784,6 @@ def create_blocks(
                         min_width=160,
                         visible=query_exec_enabled,
                         elem_classes=["orange-btn", "action-btn"],
-                    )
-                    validate_btn = gr.Button(
-                        "Validate Model",
-                        variant="secondary",
-                        scale=0,
-                        min_width=160,
-                        elem_classes=["action-btn"],
                     )
 
                 with gr.Row(elem_classes=["output-row"]):
@@ -2244,7 +2394,89 @@ def create_blocks(
                     js=_DOWNLOAD_TTL_JS,
                 )
 
-            with gr.Tab("SPARQL", id=5):
+            with gr.Tab("Business Rules", id=6) as rules_tab:
+                rules_stats = gr.Markdown(
+                    "Rules declared in the model's `rules:` block appear here. "
+                    "Click Refresh Rules to list them.",
+                    elem_id="ob-rules-stats",
+                )
+                rules_table = gr.Dataframe(
+                    label="Rules",
+                    show_label=False,
+                    interactive=False,
+                    # One line per rule: names and the reads column get the
+                    # room, the enum-valued columns what their longest value
+                    # needs, so nothing wraps and six rules fit the fixed height.
+                    wrap=False,
+                    column_widths=["15%", "13%", "9%", "9%", "8%", "14%", "15%", "9%", "8%"],
+                    elem_classes=["rules-table"],
+                    visible=False,
+                )
+                with gr.Row():
+                    rule_picker = gr.Dropdown(
+                        choices=[],
+                        value=None,
+                        label="Rule",
+                        filterable=False,
+                        scale=3,
+                        min_width=280,
+                    )
+                    rules_refresh_btn = gr.Button(
+                        "Refresh Rules", scale=1, min_width=150, elem_classes=["green-btn"]
+                    )
+                    test_rule_btn = gr.Button(
+                        "Test Rule",
+                        variant="primary",
+                        elem_classes=["purple-btn"],
+                        scale=1,
+                        min_width=150,
+                    )
+                    test_all_btn = gr.Button(
+                        "Test All Rules",
+                        variant="primary",
+                        elem_classes=["orange-btn"],
+                        scale=1,
+                        min_width=150,
+                    )
+                rules_status = gr.Markdown(
+                    "Test Rule runs one rule and lists its findings (members for a "
+                    "classification or eligibility rule, violations for a validation or "
+                    "constraint). Test All Rules runs every rule into a report.",
+                    elem_id="ob-rules-status",
+                )
+                findings_table = gr.Dataframe(
+                    label="Findings",
+                    show_label=False,
+                    interactive=False,
+                    wrap=True,
+                    elem_classes=["findings-table"],
+                    visible=False,
+                )
+
+                _rules_inputs = [model_input, api_url, dialect, session_state, model_state]
+                _rules_load_outputs = [
+                    rules_stats,
+                    rules_table,
+                    rule_picker,
+                    session_state,
+                    model_state,
+                ]
+                rules_tab.select(fn=load_rules, inputs=_rules_inputs, outputs=_rules_load_outputs)
+                rules_refresh_btn.click(
+                    fn=load_rules, inputs=_rules_inputs, outputs=_rules_load_outputs
+                )
+                test_rule_btn.click(
+                    fn=evaluate_rule_ui,
+                    inputs=[model_input, api_url, dialect, rule_picker, session_state, model_state],
+                    outputs=[rules_status, findings_table, session_state, model_state],
+                )
+                test_all_btn.click(
+                    fn=evaluate_all_rules_ui,
+                    inputs=_rules_inputs,
+                    outputs=[rules_status, findings_table, session_state, model_state],
+                )
+
+            with gr.Tab("SPARQL", id=5) as sparql_tab:
                 from orionbelt.obsl.sparql_examples import EXAMPLE_TITLES, example_query
 
                 with gr.Row():
@@ -2252,29 +2484,35 @@ def create_blocks(
                         choices=list(EXAMPLE_TITLES),
                         value=EXAMPLE_TITLES[0],
                         label="Example query",
+                        # A short fixed gallery: a plain select, not a type-to-filter box.
+                        filterable=False,
                         scale=3,
                         min_width=280,
                     )
                     sparql_btn = gr.Button(
-                        "Run Query",
+                        "Execute Query",
                         variant="primary",
-                        elem_classes=["purple-btn"],
+                        elem_classes=["orange-btn"],
                         scale=1,
                         min_width=160,
                     )
-                sparql_code = gr.Code(
+                # The visible editor is ACE (see _ace_head): SPARQL grammar,
+                # line numbers, folding. Its text lives in the hidden bridge
+                # textbox, which is what Python reads and writes.
+                gr.HTML(
+                    '<div id="ob-sparql-ace" aria-label="SPARQL query editor"></div>',
+                    padding=False,
+                )
+                sparql_code = gr.Textbox(
                     value=example_query(EXAMPLE_TITLES[0]),
-                    # Gradio has no SPARQL mode; SQL shares enough keywords
-                    # (SELECT, WHERE, ORDER BY, FILTER, strings, comments) to
-                    # colour a query usefully rather than leave it monochrome.
-                    language="sql",
-                    lines=10,
                     label="SPARQL (SELECT or ASK; read-only)",
-                    elem_id="ob-sparql-code",
+                    lines=10,
+                    elem_id="ob-sparql-bridge",
+                    interactive=True,
                 )
                 sparql_status = gr.Markdown(
                     "Pick an example or write a query over the model's OBSL graph, "
-                    "then click Run Query.",
+                    "then click Execute Query.",
                     elem_id="ob-sparql-status",
                 )
                 sparql_table = gr.Dataframe(
@@ -2290,8 +2528,15 @@ def create_blocks(
                     fn=sparql_example_query,
                     inputs=[sparql_example_dd],
                     outputs=[sparql_code],
+                ).then(fn=None, js="() => window.__obSparql && window.__obSparql.pull()")
+                # ACE can only measure a container that is on screen, so the
+                # editor is created (or re-measured) when the tab is shown.
+                sparql_tab.select(
+                    fn=None, js="() => window.__obSparql && window.__obSparql.ensure()"
                 )
                 sparql_btn.click(
+                    fn=None, js="() => window.__obSparql && window.__obSparql.flush()"
+                ).then(
                     fn=run_sparql,
                     inputs=[model_input, api_url, sparql_code, session_state, model_state],
                     outputs=[sparql_table, sparql_status, session_state, model_state],

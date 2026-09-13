@@ -138,8 +138,12 @@ def embedded_ui_url() -> Iterator[str]:
     from orionbelt.api.app import create_app
     from orionbelt.settings import Settings
 
-    app = create_app(settings=Settings(ui_enabled=True))
+    # The port first: the embedded UI takes its API URL from the settings'
+    # effective port at build time, so an app built before the port is known
+    # points its tabs at the default (or the .env) port, where a developer's
+    # own server may be answering and this fixture's never is.
     port = _free_port()
+    app = create_app(settings=Settings(ui_enabled=True, port=port))
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     threading.Thread(target=server.run, daemon=True).start()
@@ -301,7 +305,9 @@ class TestTheSparqlTab:
     def test_an_example_renders_rows(self, embedded_page: Any) -> None:
         page = embedded_page
         page.get_by_role("tab", name="SPARQL").click()
-        page.get_by_role("button", name="Run Query").click()
+        # The editor is ACE with the SPARQL grammar: keywords are tokenised.
+        page.wait_for_selector(".ace_editor .ace_keyword", timeout=30_000)
+        page.get_by_role("button", name="Execute Query").click()
         page.wait_for_function(
             "() => document.querySelector('#ob-sparql-status')?.innerText.startsWith('SELECT:')",
             timeout=60_000,
@@ -316,13 +322,57 @@ class TestTheSparqlTab:
     def test_the_ask_example_shows_a_boolean(self, embedded_page: Any) -> None:
         page = embedded_page
         page.get_by_role("tab", name="SPARQL").click()
-        combo = page.get_by_label("Example query")
-        combo.click()
-        combo.fill("schema.org")
+        # A plain select (not filterable): open it and pick the option.
+        page.get_by_label("Example query").click()
         page.get_by_role("option", name="Does the model link into schema.org? (ASK)").click()
-        page.get_by_role("button", name="Run Query").click()
+        page.get_by_role("button", name="Execute Query").click()
         page.wait_for_function(
             "() => document.querySelector('#ob-sparql-status')?.innerText.includes('ASK:')",
             timeout=60_000,
         )
         assert "true" in page.locator("#ob-sparql-status").inner_text()
+
+
+class TestTheBusinessRulesTab:
+    """The Business Rules tab lists the demo's rules and reports a test outcome.
+
+    On the embedded UI, like the SPARQL tests. Listing needs only the API;
+    testing needs a warehouse, which the embedded fixture does not configure,
+    so the status line must carry the endpoint's refusal rather than hang.
+    """
+
+    def test_the_demo_rules_are_listed(self, embedded_page: Any) -> None:
+        page = embedded_page
+        page.get_by_role("tab", name="Business Rules").click()
+        # The placeholder text also mentions rules: wait for the loaded
+        # statistics line (a count and a dialect) or an error, not the word.
+        page.wait_for_function(
+            "() => /\\d+ rules on|Error|declares no rules/.test("
+            "document.querySelector('#ob-rules-stats')?.innerText || '')",
+            timeout=60_000,
+        )
+        stats = page.locator("#ob-rules-stats").inner_text()
+        assert "6 rules" in stats
+        # Gradio virtualises the body, so only the rows that fit the viewport
+        # are in the DOM: the count is "some", the six is in the statistics.
+        page.wait_for_selector(".rules-table table tbody tr", state="attached", timeout=30_000)
+        assert page.locator(".rules-table table tbody tr").count() > 0
+
+    def test_testing_a_rule_reports_an_outcome(self, embedded_page: Any) -> None:
+        page = embedded_page
+        page.get_by_role("tab", name="Business Rules").click()
+        # The placeholder text also mentions rules: wait for the loaded
+        # statistics line (a count and a dialect) or an error, not the word.
+        page.wait_for_function(
+            "() => /\\d+ rules on|Error|declares no rules/.test("
+            "document.querySelector('#ob-rules-stats')?.innerText || '')",
+            timeout=60_000,
+        )
+        page.get_by_role("button", name="Test Rule").click()
+        page.wait_for_function(
+            "() => { const t = document.querySelector('#ob-rules-status')?.innerText || '';"
+            " return t.includes('Error') || t.includes(' in ') }",
+            timeout=60_000,
+        )
+        status = page.locator("#ob-rules-status").inner_text()
+        assert "Error" in status or "Electronics Sale" in status
