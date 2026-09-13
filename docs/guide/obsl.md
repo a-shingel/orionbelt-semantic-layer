@@ -180,6 +180,52 @@ SELECT ?metric ?measure WHERE {
 ```
 
 ```sparql
+# Every modeled artefact by type and label
+PREFIX obsl: <https://ralforion.com/ns/obsl#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?type ?label WHERE {
+    ?x a ?type ;
+       rdfs:label ?label .
+    FILTER(?type IN (obsl:DataObject, obsl:Dimension, obsl:Measure, obsl:Metric))
+}
+ORDER BY ?type ?label
+```
+
+```sparql
+# Measures and the physical columns they aggregate
+PREFIX obsl: <https://ralforion.com/ns/obsl#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+SELECT ?measure ?aggregation ?column WHERE {
+    ?m a obsl:Measure ;
+       rdfs:label ?measure ;
+       obsl:aggregation ?aggregation ;
+       obsl:sourceColumn ?c .
+    ?c obsl:code ?column .
+}
+```
+
+```sparql
+# Which artefacts link into one external namespace, and with what provenance?
+PREFIX obsl: <https://ralforion.com/ns/obsl#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+SELECT ?label ?relation ?concept ?justification ?source WHERE {
+    ?x rdfs:label ?label ;
+       ?relation ?concept .
+    FILTER(?relation IN (skos:exactMatch, skos:closeMatch, skos:broadMatch,
+                         skos:narrowMatch, skos:relatedMatch))
+    FILTER(STRSTARTS(STR(?concept), "https://example.com/ontology/commerce/"))
+    OPTIONAL {
+        ?x obsl:hasExternalConceptMapping ?mapping .
+        ?mapping obsl:targetConcept ?concept ;
+                 obsl:mappingJustification ?justification ;
+                 obsl:mappingSource ?source .
+    }
+}
+ORDER BY ?label
+```
+
+```sparql
 # What does each measure mean in the corporate ontology?
 # externalConceptMappings become direct skos:*Match triples from the
 # element to the external IRI; one with provenance also has an
