@@ -135,7 +135,7 @@ Response:
 ### More query ideas
 
 ```sparql
--- Find all joins and their cardinality
+# Find all joins and their cardinality
 PREFIX obsl: <https://ralforion.com/ns/obsl#>
 SELECT ?from ?to ?card WHERE {
     ?j a obsl:Join ;
@@ -146,7 +146,7 @@ SELECT ?from ?to ?card WHERE {
 ```
 
 ```sparql
--- Find all synonyms across the model
+# Find all synonyms across the model
 PREFIX obsl: <https://ralforion.com/ns/obsl#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 SELECT ?label ?synonym WHERE {
@@ -156,7 +156,7 @@ SELECT ?label ?synonym WHERE {
 ```
 
 ```sparql
--- Find metrics that reference a specific measure
+# Find metrics that reference a specific measure
 PREFIX obsl: <https://ralforion.com/ns/obsl#>
 PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 SELECT ?metric ?measure WHERE {
@@ -164,6 +164,23 @@ SELECT ?metric ?measure WHERE {
        rdfs:label ?metric ;
        obsl:referencesMeasure ?ref .
     ?ref rdfs:label ?measure .
+}
+```
+
+```sparql
+# What does each measure mean in the corporate ontology?
+# externalConceptMappings become direct skos:*Match triples from the
+# element to the external IRI; one with provenance also has an
+# obsl:ExternalConceptMapping resource (source, justification, confidence).
+PREFIX obsl: <https://ralforion.com/ns/obsl#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
+SELECT ?measure ?relation ?concept WHERE {
+    ?m a obsl:Measure ;
+       rdfs:label ?measure ;
+       ?relation ?concept .
+    FILTER(?relation IN (skos:exactMatch, skos:closeMatch, skos:broadMatch,
+                         skos:narrowMatch, skos:relatedMatch))
 }
 ```
 
