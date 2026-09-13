@@ -6,6 +6,26 @@ All notable changes to OrionBelt Semantic Layer are documented here.
 
 ### Added
 
+- **Business Rules tab: select a rule by clicking its row, and show its definition.** The rule
+  dropdown is gone; clicking a row of the rules table selects that rule (the first rule after a
+  load), tinted as a whole row and named in a Selected rule label. A "Show rule definition"
+  toggle displays the selected rule's OBML as YAML (type, description, severity, grain, condition,
+  owner, synonyms, concept mappings with their provenance),
+  following the selection and the refresh, so a rule can be read next to its findings without
+  scrolling the model editor. The dropdown also broke after a UI restart or on a new instance,
+  because it validated the picked value against choices the new process did not have.
+- **UI blocks that end a tab are sized to the window live.** The findings table, the SPARQL
+  results, the SQL Compiler output row, the ER diagram and the ontology graph canvas used fixed
+  viewport fractions and offsets, which added up only on tall windows: on shorter ones they ran
+  past the fold, and with the rule definition open the findings could not be seen at all. A small
+  script now measures what is left of the window below each such block, footer included, and
+  caps it there (never less than a few rows, lines, or a usable canvas), re-fitting on resize and
+  on every layout change. Maximising a table lifts the cap, so the fullscreen view fills the
+  screen instead of staying at the fitted height.
+- **Ontology Graph tab: Export Onto sits under Render Graph, and Render Graph lays out anew.** The
+  export button no longer spans the page as a green bar. Each render now uses a fresh layout seed,
+  so clicking Render Graph rearranges the graph (before, the regenerated page was identical and
+  the click changed nothing).
 - **SPARQL syntax highlighting in the UI.** The SPARQL tab's editor is now ACE (vendored under
   `ui/static` like vis-network and mermaid, so nothing is fetched from a CDN) with its SPARQL
   grammar, line numbers, folding, and a light and a dark theme that follow the UI's mode.

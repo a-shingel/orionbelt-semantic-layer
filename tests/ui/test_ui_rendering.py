@@ -376,3 +376,43 @@ class TestTheBusinessRulesTab:
         )
         status = page.locator("#ob-rules-status").inner_text()
         assert "Error" in status or "Electronics Sale" in status
+
+    def test_show_definition_reveals_the_picked_rules_yaml(self, embedded_page: Any) -> None:
+        page = embedded_page
+        page.get_by_role("tab", name="Business Rules").click()
+        page.wait_for_function(
+            "() => /\\d+ rules on|Error|declares no rules/.test("
+            "document.querySelector('#ob-rules-stats')?.innerText || '')",
+            timeout=60_000,
+        )
+        page.get_by_label("Show rule definition").check()
+        page.wait_for_function(
+            "() => (document.querySelector('#ob-rule-definition')?.innerText || '')"
+            ".includes('condition')",
+            timeout=60_000,
+        )
+        text = page.locator("#ob-rule-definition").inner_text()
+        assert "Electronics Sale" in text and "Product Category" in text
+
+    def test_clicking_a_table_row_selects_that_rule(self, embedded_page: Any) -> None:
+        page = embedded_page
+        page.get_by_role("tab", name="Business Rules").click()
+        page.wait_for_function(
+            "() => /\\d+ rules on/.test("
+            "document.querySelector('#ob-rules-stats')?.innerText || '')",
+            timeout=60_000,
+        )
+        label = page.locator("#ob-rules-selected-label")
+        label.get_by_text("Electronics Sale").wait_for(timeout=30_000)
+        page.get_by_label("Show rule definition").check()
+        # The visible body is virtualised into div cells; the <td>s are a hidden
+        # sizing copy.
+        page.locator(
+            ".rules-table .virtual-row .body-cell", has_text="High Return Rate"
+        ).first.click()
+        page.wait_for_function(
+            "() => (document.querySelector('#ob-rule-definition')?.innerText || '')"
+            ".includes('Return Rate')",
+            timeout=60_000,
+        )
+        assert "High Return Rate" in label.inner_text()

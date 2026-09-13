@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 pytest.importorskip("gradio", reason="gradio required for the UI handlers")
 pytest.importorskip("pandas", reason="pandas required for the results table")
 
 from orionbelt.ui import api_client  # noqa: E402
-from orionbelt.ui.handlers import evaluate_all_rules_ui, evaluate_rule_ui, load_rules  # noqa: E402
+from orionbelt.ui.handlers import (  # noqa: E402
+    evaluate_all_rules_ui,
+    evaluate_rule_ui,
+    load_rules,
+    rule_definition,
+    rule_definition_yaml,
+    select_rule,
+    selected_rule_label,
+)
 
 _MODEL = "version: 1.0\ndataObjects: {}\n"
 
@@ -93,17 +103,14 @@ class TestLoad:
         frame = table["value"]
         assert list(frame["rule"]) == ["High Return Rate", "Broken"]
         assert frame.iloc[1]["executable"] == "no: Unknown dimension X"
-        assert (
-            picker["choices"] == ["High Return Rate", "Broken"]
-            and picker["value"] == "High Return Rate"
-        )
+        assert picker["value"] == "High Return Rate"
         assert session == {"session_id": "s1"} and model == {"model_id": "m1"}
 
     def test_no_rules(self) -> None:
         with _with(_client(200, {"dialect": "duckdb", "rules": [], "statistics": {"total": 0}})):
             stats, table, picker, _, _ = load_rules(_MODEL, "http://api", "", None, None)
         assert "declares no rules" in stats
-        assert not _visible(table) and picker["choices"] == []
+        assert not _visible(table) and picker["value"] == ""
 
     def test_api_error_is_shown(self) -> None:
         with _with(_client(404, {"detail": "Model 'm1' not found"})):
@@ -237,3 +244,122 @@ class TestTestAll:
             text, table, _, _ = evaluate_all_rules_ui(_MODEL, "http://nope:1", "", None, None)
         assert text == "**Error:** API unreachable at http://nope:1."
         assert not _visible(table)
+
+
+class TestRuleDefinition:
+    _DETAIL = {
+        "name": "Healthy Category",
+        "type": "validation",
+        "severity": "warning",
+        "grain": ["Product Category"],
+        "description": "A category that sells must not be a high-return one",
+        "owner": None,
+        "synonyms": [],
+        "condition": {
+            "all": [
+                {"field": "Total Sales", "op": ">", "value": 0},
+                {"not": {"rule": "High Return Rate"}},
+            ]
+        },
+        "external_concept_mappings": [
+            {
+                "concept": "corp:HealthyCategory",
+                "expanded_iri": "https://corp.example/HealthyCategory",
+                "relation": "exact",
+                "justification": "curated",
+                "source": None,
+                "ontology_version": "2026.1",
+                "confidence": 0.9,
+                "comment": "",
+            }
+        ],
+    }
+
+    def test_yaml_is_the_obml_definition_in_key_order(self) -> None:
+        text = rule_definition_yaml(self._DETAIL)
+        assert text.startswith("Healthy Category:\n  type: validation\n")
+        keys = [
+            line[2:].split(":")[0]
+            for line in text.splitlines()
+            if line.startswith("  ") and line[2] not in " -"
+        ]
+        assert keys == [
+            "type",
+            "description",
+            "severity",
+            "grain",
+            "condition",
+            "externalConceptMappings",
+        ]
+        assert "- not:\n        rule: High Return Rate" in text
+        mapping = yaml.safe_load(text)["Healthy Category"]["externalConceptMappings"][0]
+        assert mapping == {
+            "concept": "corp:HealthyCategory",
+            "relation": "exact",
+            "justification": "curated",
+            "ontologyVersion": "2026.1",
+            "confidence": 0.9,
+        }  # authored fields kept, empty ones and the derived expanded_iri dropped
+
+    def test_default_type_is_omitted(self) -> None:
+        text = rule_definition_yaml(
+            {
+                "name": "R",
+                "type": "classification",
+                "condition": {"field": "A", "op": "=", "value": 1},
+            }
+        )
+        assert text == "R:\n  condition:\n    field: A\n    op: '='\n    value: 1\n"
+
+    def test_hidden_unless_shown_and_picked(self) -> None:
+        update, _, _ = rule_definition(_MODEL, "http://api", "", "R", False, None, None)
+        assert not _visible(update)
+        update, _, _ = rule_definition(_MODEL, "http://api", "", None, True, None, None)
+        assert not _visible(update)
+
+    def test_fetches_and_renders_the_picked_rule(self) -> None:
+        client = _client(200, self._DETAIL)
+        with _with(client):
+            update, session, model = rule_definition(
+                _MODEL, "http://api", "duckdb", "Healthy Category", True, None, None
+            )
+        client.request.assert_called_once_with(
+            "GET",
+            "/v1/sessions/s1/models/m1/rules/Healthy Category?dialect=duckdb",
+            json=None,
+            timeout=300,
+        )
+        assert _visible(update) and update["value"].startswith("Healthy Category:\n")
+        assert session == {"session_id": "s1"} and model == {"model_id": "m1"}
+
+    def test_error_is_shown_as_a_comment(self) -> None:
+        with _with(_client(404, {"detail": "Rule 'Nope' not found"})):
+            update, _, _ = rule_definition(_MODEL, "http://api", "", "Nope", True, None, None)
+        assert (
+            _visible(update) and update["value"].startswith("# ") and "not found" in update["value"]
+        )
+
+
+class TestSelectRule:
+    def _table(self):
+        import pandas as pd
+
+        return pd.DataFrame({"rule": ["Electronics Sale", "High Return Rate"], "type": ["c", "c"]})
+
+    def _evt(self, data: dict | None):
+        evt = SimpleNamespace()
+        evt._data = data
+        return evt
+
+    def test_row_click_selects_that_rule_from_any_column(self) -> None:
+        update = select_rule(self._table(), self._evt({"index": [1, 1], "value": "c"}))
+        assert update["value"] == "High Return Rate"
+
+    def test_events_without_a_row_leave_the_selection(self) -> None:
+        for data in (None, {}, {"index": None}, {"index": [5, 0]}, {"index": [[0, 0], [1, 0]]}):
+            assert "value" not in select_rule(self._table(), self._evt(data))
+        assert "value" not in select_rule(None, self._evt({"index": [0, 0]}))
+
+    def test_label_names_the_selection_or_says_how_to_make_one(self) -> None:
+        assert selected_rule_label("High Return Rate") == "Selected rule: **High Return Rate**"
+        assert "click a row" in selected_rule_label("")

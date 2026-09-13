@@ -55,7 +55,10 @@ from orionbelt.ui.handlers import (
     filter_chip_update,
     load_rules,
     model_jump_targets,
+    rule_definition,
     run_sparql,
+    select_rule,
+    selected_rule_label,
     sort_and_execute,
     sort_state_str,
     sparql_example_query,
@@ -98,7 +101,10 @@ __all__ = [
     "_render_ontology_graph",
     "_resolve_execution_dialect",
     "load_rules",
+    "rule_definition",
     "run_sparql",
+    "select_rule",
+    "selected_rule_label",
     "sparql_example_query",
     "evaluate_all_rules_ui",
     "evaluate_rule_ui",
@@ -258,6 +264,7 @@ _CSS = """\
   min-height: 240px !important;
 }
 .output-row {
+  /* Pre-script fallback: _fit_head() sizes the row to what is left of the window. */
   height: 32dvh !important;
   max-height: 32dvh !important;
   min-height: 140px !important;
@@ -435,7 +442,7 @@ _CSS = """\
   border: 1px solid var(--border-color-primary);
   border-radius: 8px;
   padding: 8px;
-  height: calc(100dvh - 220px);
+  height: calc(100dvh - 220px); /* pre-script fallback: _fit_head() sizes it live */
   min-height: 400px;
 }
 #er-diagram svg {
@@ -478,14 +485,34 @@ _CSS = """\
 .rules-table .table-wrap, .rules-table .virtual-table-viewport {
   max-height: 320px !important;
 }
-/* Same rule for the findings: below the rule list, controls and toolbar (~655px). */
+/* The findings end above the fold: _fit_head() measures what is left of the
+   window below them and sets the cap live (this is only the pre-script fallback). */
 .findings-table .table-wrap, .findings-table .virtual-table-viewport {
-  max-height: max(196px, calc(100dvh - 705px)) !important;
+  max-height: 320px !important;
 }
 .rules-table .table-wrap, .findings-table .table-wrap {
   overflow: auto !important; min-height: 100px;
 }
+/* A click selects a rule (a row), so no cell ring, no cell flash, no cell menu:
+   the whole clicked row is tinted instead. */
+.rules-table .body-cell.cell-selected { box-shadow: none !important; animation: none !important; }
+.rules-table .body-cell.cell-solo .cell-wrap > span {
+  box-shadow: none !important; background: transparent !important;
+  position: static !important; padding: 0 !important; white-space: nowrap !important;
+}
+.rules-table .cell-menu-button, .rules-table .selection-button { display: none !important; }
+.rules-table .virtual-row:has(.cell-selected) .body-cell {
+  background: color-mix(in srgb, var(--color-accent) 22%, transparent) !important;
+}
+/* The toolbar's maximize puts the table block into Gradio's fixed fullscreen
+   layout (outside the app container); none of the fitted heights above may
+   cap it there. */
+.block.fullscreen .table-wrap,
+.block.fullscreen .virtual-table-viewport {
+  max-height: none !important;
+}
 #ob-rules-stats { margin-bottom: -6px; }
+#ob-rules-selected-label { align-self: center; }
 #ob-rules-status { margin-bottom: -14px; }
 /* ── SPARQL tab: the ACE editor and its hidden bridge textbox ── */
 #ob-sparql-ace { height: 240px; border: 1px solid var(--border-color-primary, #555);
@@ -526,12 +553,11 @@ _CSS = """\
    copy + fullscreen toolbar stays, like the query results, pulled up tight
    under the status line. ── */
 .sparql-table .header-row { margin-bottom: 0 !important; min-height: 0 !important; }
-/* Fill what is left of the window below the editor and the toolbar (the table
-   top sits at ~610px),
-   never less than a few rows: a tall window shows more, a short one scrolls. */
+/* Fill what is left of the window below the editor and the toolbar: set live by
+   _fit_head() (this is only the pre-script fallback). */
 .sparql-table .table-wrap,
 .sparql-table .virtual-table-viewport {
-  max-height: max(220px, calc(100dvh - 660px)) !important;
+  max-height: 320px !important;
 }
 .sparql-table .table-wrap { overflow: auto !important; min-height: 140px; }
 #ob-sparql-status { margin-bottom: -14px; }
@@ -1359,6 +1385,108 @@ def _ace_head() -> str:
 """
 
 
+_FIT_JS = """
+<script>
+(function () {
+  // Size the last block of a tab to what is left of the window below it, so
+  // it ends above the fold and scrolls inside itself. Fixed offsets cannot do
+  // this: what sits above (a rule definition, an editor) varies in height.
+  var RESERVE = 92;        // below the block, when the footer cannot be measured
+  var TAIL = 20;           // the container's padding under the footer
+  var FLOOR_TABLE = 120;   // never less than the header and a couple of rows
+  var FLOOR_ROW = 140;     // never less than a few lines of SQL
+  var FLOOR_BOX = 300;     // a diagram or graph canvas
+  var pending = false;
+
+  function setPx(el, prop, value) {
+    var px = Math.round(value) + 'px';
+    if (el.style.getPropertyValue(prop) !== px) el.style.setProperty(prop, px, 'important');
+  }
+  function setNone(el, prop) {
+    if (el.style.getPropertyValue(prop) !== 'none') el.style.setProperty(prop, 'none', 'important');
+  }
+  function remaining(el, floor, outer) {
+    var rect = el.getBoundingClientRect();
+    var top = rect.top + window.scrollY;
+    // What the enclosing block adds below the element (padding, a border
+    // Gradio leaves behind after fullscreen) comes off the budget too.
+    var blockBottom = rect.bottom;
+    if (outer) blockBottom = Math.max(blockBottom, outer.getBoundingClientRect().bottom);
+    var extra = blockBottom - rect.bottom;
+    // Measure what the page puts under the block (gaps, the footer) rather
+    // than guessing: the distance to the footer does not depend on the
+    // block's own height, so the fit settles in one pass.
+    var below = RESERVE;
+    var footer = document.querySelector('.gradio-container footer');
+    if (footer) {
+      var f = footer.getBoundingClientRect();
+      var gap = f.top - blockBottom;
+      if (gap >= 0 && gap <= 200) below = gap + f.height + TAIL;
+    }
+    return Math.max(floor, window.innerHeight - top - extra - below);
+  }
+  function fitTable(block) {
+    var wrap = block.querySelector('.table-wrap');
+    if (!wrap) return;
+    var viewports = block.querySelectorAll('.virtual-table-viewport');
+    var targets = [wrap].concat(Array.prototype.slice.call(viewports));
+    // Maximised (Gradio's fixed fullscreen layout): no cap at all.
+    if (block.classList.contains('fullscreen') || block.closest('.fullscreen')) {
+      targets.forEach(function (t) { setNone(t, 'max-height'); });
+      return;
+    }
+    var h = remaining(wrap, FLOOR_TABLE, block);
+    targets.forEach(function (t) { setPx(t, 'max-height', h); });
+  }
+  function fitRow(row) {
+    var h = remaining(row, FLOOR_ROW, null);
+    setPx(row, 'height', h);
+    setPx(row, 'max-height', h);
+  }
+  function fitBox(box) {
+    // A diagram or graph canvas: the block itself, or an element inside one.
+    var outer = box.classList.contains('block') ? null : box.closest('.block');
+    var h = remaining(box, FLOOR_BOX, outer);
+    setPx(box, 'height', h);
+    setPx(box, 'max-height', h);
+  }
+  function fit() {
+    pending = false;
+    // Document order: sizing a block only moves what is below it.
+    document.querySelectorAll('.ob-fit-table, .ob-fit-row, .ob-fit-box').forEach(function (block) {
+      var r = block.getBoundingClientRect();
+      if (!r.width && !r.height) return;   // hidden tab or hidden block
+      // Gradio repeats elem_classes on a component's inner element: the
+      // outermost tagged element is the one to size.
+      if (block.parentElement.closest('.ob-fit-table, .ob-fit-row, .ob-fit-box')) return;
+      if (block.classList.contains('ob-fit-row')) fitRow(block);
+      else if (block.classList.contains('ob-fit-box')) fitBox(block);
+      else fitTable(block);
+    });
+  }
+  function schedule() {
+    if (pending) return;
+    pending = true;
+    window.requestAnimationFrame(fit);
+  }
+  window.addEventListener('resize', schedule);
+  window.addEventListener('load', schedule);
+  // Style writes above only happen when the value changes, so the observer
+  // settles after one extra pass rather than looping.
+  new MutationObserver(schedule).observe(document.documentElement, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style']
+  });
+  schedule();
+})();
+</script>
+"""
+
+
+def _fit_head() -> str:
+    """The viewport fitter for the tables and editor rows that end a tab."""
+    return _FIT_JS
+
+
 def frontend_assets(head_html: str | None = None) -> dict[str, str]:
     """The css/js/head every way of serving this app has to pass along.
 
@@ -1369,7 +1497,7 @@ def frontend_assets(head_html: str | None = None) -> dict[str, str]:
     the constructor it reaches only whichever mode happens to look there.
     """
     assets = {"css": _CSS, "js": _DARK_MODE_INIT_JS}
-    vendored = _mermaid_head() + _ace_head()
+    vendored = _mermaid_head() + _ace_head() + _fit_head()
     assets["head"] = f"{head_html}\n{vendored}" if head_html else vendored
     return assets
 
@@ -1786,7 +1914,7 @@ def create_blocks(
                         elem_classes=["orange-btn", "action-btn"],
                     )
 
-                with gr.Row(elem_classes=["output-row"]):
+                with gr.Row(elem_classes=["output-row", "ob-fit-row"]):
                     sql_output = gr.Code(
                         language="sql",
                         label="Generated SQL",
@@ -2201,6 +2329,7 @@ def create_blocks(
                     value="*Click 'Refresh Diagram' to generate the ER diagram "
                     "from the model YAML.*",
                     elem_id="er-diagram",
+                    elem_classes=["ob-fit-box"],
                 )
 
                 _apply_zoom_js = """(zoom) => {
@@ -2323,19 +2452,14 @@ def create_blocks(
                         scale=2,
                         min_width=240,
                     )
-                    ontology_btn = gr.Button(
-                        "Render Graph",
-                        variant="primary",
-                        elem_classes=["purple-btn"],
-                        scale=1,
-                        min_width=160,
-                    )
-                    export_onto_btn = gr.Button(
-                        "Export Onto",
-                        elem_classes=["green-btn"],
-                        scale=1,
-                        min_width=160,
-                    )
+                    # Stacked at the right of the controls: render above, export below.
+                    with gr.Column(scale=1, min_width=160):
+                        ontology_btn = gr.Button(
+                            "Render Graph",
+                            variant="primary",
+                            elem_classes=["purple-btn"],
+                        )
+                        export_onto_btn = gr.Button("Export Onto", elem_classes=["green-btn"])
 
                 ontology_output = gr.HTML(
                     value=(
@@ -2413,13 +2537,25 @@ def create_blocks(
                     visible=False,
                 )
                 with gr.Row():
-                    rule_picker = gr.Dropdown(
-                        choices=[],
-                        value=None,
-                        label="Rule",
-                        filterable=False,
+                    # The selected rule: set by clicking a row of the rules table
+                    # (the first rule after a load), shown as a label. The value
+                    # itself rides in a hidden textbox rather than a dropdown or
+                    # gr.State: the browser keeps it, so it survives a UI restart
+                    # or a new instance (a dropdown validates against the choices
+                    # the server process knows, which are empty again then).
+                    selected_rule = gr.Textbox(visible=False, elem_id="ob-rules-selected")
+                    selected_rule_md = gr.Markdown(
+                        selected_rule_label(None),
                         scale=3,
                         min_width=280,
+                        elem_id="ob-rules-selected-label",
+                    )
+                    show_definition_cb = gr.Checkbox(
+                        value=False,
+                        label="Show rule definition",
+                        scale=1,
+                        min_width=220,
+                        elem_id="ob-rules-show-definition",
                     )
                     rules_refresh_btn = gr.Button(
                         "Refresh Rules", scale=1, min_width=150, elem_classes=["green-btn"]
@@ -2438,6 +2574,15 @@ def create_blocks(
                         scale=1,
                         min_width=150,
                     )
+                rule_definition_code = gr.Code(
+                    language="yaml",
+                    interactive=False,
+                    lines=6,
+                    max_lines=10,
+                    label="Rule definition (OBML)",
+                    elem_id="ob-rule-definition",
+                    visible=False,
+                )
                 rules_status = gr.Markdown(
                     "Test Rule runs one rule and lists its findings (members for a "
                     "classification or eligibility rule, violations for a validation or "
@@ -2449,7 +2594,7 @@ def create_blocks(
                     show_label=False,
                     interactive=False,
                     wrap=True,
-                    elem_classes=["findings-table"],
+                    elem_classes=["findings-table", "ob-fit-table"],
                     visible=False,
                 )
 
@@ -2457,17 +2602,48 @@ def create_blocks(
                 _rules_load_outputs = [
                     rules_stats,
                     rules_table,
-                    rule_picker,
+                    selected_rule,
                     session_state,
                     model_state,
                 ]
-                rules_tab.select(fn=load_rules, inputs=_rules_inputs, outputs=_rules_load_outputs)
+                _definition_inputs = [
+                    model_input,
+                    api_url,
+                    dialect,
+                    selected_rule,
+                    show_definition_cb,
+                    session_state,
+                    model_state,
+                ]
+                _definition_outputs = [rule_definition_code, session_state, model_state]
+                # The definition follows the selected rule and the checkbox; after a
+                # (re)load it is re-rendered for the (possibly edited) model too.
+                rules_tab.select(
+                    fn=load_rules, inputs=_rules_inputs, outputs=_rules_load_outputs
+                ).then(fn=rule_definition, inputs=_definition_inputs, outputs=_definition_outputs)
                 rules_refresh_btn.click(
                     fn=load_rules, inputs=_rules_inputs, outputs=_rules_load_outputs
+                ).then(fn=rule_definition, inputs=_definition_inputs, outputs=_definition_outputs)
+                rules_table.select(fn=select_rule, inputs=[rules_table], outputs=[selected_rule])
+                selected_rule.change(
+                    fn=selected_rule_label, inputs=[selected_rule], outputs=[selected_rule_md]
+                )
+                selected_rule.change(
+                    fn=rule_definition, inputs=_definition_inputs, outputs=_definition_outputs
+                )
+                show_definition_cb.change(
+                    fn=rule_definition, inputs=_definition_inputs, outputs=_definition_outputs
                 )
                 test_rule_btn.click(
                     fn=evaluate_rule_ui,
-                    inputs=[model_input, api_url, dialect, rule_picker, session_state, model_state],
+                    inputs=[
+                        model_input,
+                        api_url,
+                        dialect,
+                        selected_rule,
+                        session_state,
+                        model_state,
+                    ],
                     outputs=[rules_status, findings_table, session_state, model_state],
                 )
                 test_all_btn.click(
@@ -2520,7 +2696,7 @@ def create_blocks(
                     show_label=False,
                     interactive=False,
                     wrap=True,
-                    elem_classes=["sparql-table"],
+                    elem_classes=["sparql-table", "ob-fit-table"],
                     visible=False,
                 )
 

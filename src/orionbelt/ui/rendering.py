@@ -8,6 +8,7 @@ formatting. None of these reach the network; the API-backed fetches live in
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 _VIS_NETWORK_B64: str | None = None
@@ -372,6 +373,10 @@ def _generate_ontology_graph_html(
     n_count = len(nodes)
     iters = min(max(n_count * 3, 150), 500)
     options = {
+        # A fresh seed per render: vis-network places nodes from it, so Render
+        # Graph lays the graph out anew (with the same seed, and so the same
+        # HTML, Gradio would not even re-render the iframe).
+        "layout": {"randomSeed": random.randrange(1, 2**31)},
         "physics": {
             "enabled": True,
             "barnesHut": {
@@ -462,7 +467,7 @@ document.getElementById('rot-r').onclick=function(){{rotate(15);}};
     srcdoc = inner_html.replace("&", "&amp;").replace('"', "&quot;")
     return (
         f'<iframe srcdoc="{srcdoc}" '
-        f'style="width:100%;height:calc(100dvh - 310px);'
+        f'class="ob-fit-box" style="width:100%;height:calc(100dvh - 310px);'
         f"border:1px solid #555;"
         f'border-radius:8px" sandbox="allow-scripts allow-downloads"></iframe>'
     )
