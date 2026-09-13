@@ -1016,7 +1016,7 @@ Return the join graph as nodes and edges.
 
 ## External Concept Mappings
 
-Links from model artefacts to concepts in external ontologies, authored in OBML as `ontology.prefixes` plus `externalConceptMappings` on the model, a data object, a dimension, a measure or a metric. Descriptive metadata only: nothing here changes SQL. The describe endpoints above (`schema`, `dimensions/{name}`, `measures/{name}`, `metrics/{name}`) carry each artefact's mappings under `external_concept_mappings`; these endpoints answer the cross-cutting questions.
+Links from model artefacts to concepts in external ontologies, authored in OBML as `ontology.prefixes` plus `externalConceptMappings` on the model, a data object, a dimension, a measure, a metric or a rule. Descriptive metadata only: nothing here changes SQL. The describe endpoints above (`schema`, `dimensions/{name}`, `measures/{name}`, `metrics/{name}`) carry each artefact's mappings under `external_concept_mappings`; these endpoints answer the cross-cutting questions.
 
 ### `GET /v1/sessions/{session_id}/models/{model_id}/concept-mappings`
 
@@ -1027,7 +1027,7 @@ Every mapping in the model, with the artefact it sits on and the concept expande
 | `concept` | A compact IRI using the model's prefixes (`corp:NetRevenue`) or a full IRI. Returns the artefacts mapped to that concept; the response echoes the expanded IRI in `concept`. An undeclared prefix or a malformed IRI is **422**. |
 | `namespace` | A declared or built-in prefix name (`corp`) or an absolute namespace IRI the target must start with. Anything else is **422**. |
 | `relation` | One of `exact`, `close`, `broader`, `narrower`, `related`. |
-| `types` | Comma-separated subset of `model`, `dataObject`, `dimension`, `measure`, `metric`. |
+| `types` | Comma-separated subset of `model`, `dataObject`, `dimension`, `measure`, `metric`, `rule`. |
 
 **Response (200):**
 
@@ -1071,7 +1071,7 @@ The external namespaces the model links into, most used first, plus the declared
 
 ### `GET /v1/sessions/{session_id}/models/{model_id}/concept-mappings/unmapped`
 
-Artefacts in the mappable scope that carry no mapping yet: the model itself, data objects, dimensions, declared measures and metrics. Synthesized count measures cannot carry mappings and are not listed. `types` (comma-separated) narrows the report.
+Artefacts in the mappable scope that carry no mapping yet: the model itself, data objects, dimensions, declared measures, metrics and rules. Synthesized count measures cannot carry mappings and are not listed. `types` (comma-separated) narrows the report.
 
 **Response (200):**
 
@@ -1082,7 +1082,87 @@ Artefacts in the mappable scope that carry no mapping yet: the model itself, dat
  {"type": "measure", "name": "Order Total"}
  ],
  "total": 2,
- "types": ["model", "dataObject", "dimension", "measure", "metric"]
+ "types": ["model", "dataObject", "dimension", "measure", "metric", "rule"]
+}
+```
+
+---
+
+## Business Rules
+
+Declarative rules from the OBML `rules` block (see the [Business Rules guide](../guide/business-rules.md)). A rule compiles to an ordinary query whose rows are its findings: members for `classification` and `eligibility`, violations for `validation` and `constraint`.
+
+### `GET /v1/sessions/{session_id}/models/{model_id}/rules`
+
+Every rule with its derived facts and whether it compiles, plus statistics. `?dialect=` overrides the dialect (defaults like `query/sql`: model default, then `DB_VENDOR`).
+
+**Response (200):**
+
+```json
+{
+ "dialect": "duckdb",
+ "rules": [
+ {
+ "name": "High Return Rate",
+ "type": "classification",
+ "level": "aggregate",
+ "findings": "matches",
+ "severity": null,
+ "grain": ["Product Category"],
+ "description": "Product categories returning more than a tenth of what they sell",
+ "owner": null,
+ "dimensions": ["Product Category"],
+ "measures": ["Return Rate"],
+ "depends_on": [],
+ "executable": true,
+ "error": null
+ }
+ ],
+ "statistics": {
+ "total": 6,
+ "by_type": {"classification": 3, "eligibility": 1, "validation": 2},
+ "by_level": {"row": 1, "aggregate": 5},
+ "by_severity": {"error": 1, "warning": 1},
+ "executable": 6,
+ "not_executable": 0
+ }
+}
+```
+
+### `GET /v1/sessions/{session_id}/models/{model_id}/rules/{name}`
+
+One rule: everything the list carries plus `condition` (as authored), `synonyms`, `external_concept_mappings` and `query` (the QueryObject whose rows are the findings). **404** for an unknown rule.
+
+### `POST /v1/sessions/{session_id}/models/{model_id}/rules/{name}/compile`
+
+Compile one rule. Body: `{"dialect": "postgres"}`, optional.
+
+**Response (200):**
+
+```json
+{
+ "name": "High Return Rate",
+ "level": "aggregate",
+ "findings": "matches",
+ "dialect": "postgres",
+ "sql": "SELECT ... GROUP BY ... HAVING ...",
+ "query": {"select": {"dimensions": ["Product Category"], "measures": ["Return Rate"]}, "having": [{"field": "Return Rate", "op": ">", "value": 0.1}]},
+ "warnings": []
+}
+```
+
+Compile failures are reported the way `query/sql` reports them: **422** with structured errors, **400** for an unsupported dialect.
+
+### `POST /v1/sessions/{session_id}/models/{model_id}/rules/compile`
+
+Compile every rule. A rule that fails is a row with `status: "failed"` and its `error`; the response is always **200**.
+
+```json
+{
+ "dialect": "duckdb",
+ "results": [{"name": "Electronics Sale", "status": "compiled", "level": "row", "findings": "matches", "sql": "SELECT ...", "error": null}],
+ "compiled": 6,
+ "failed": 0
 }
 ```
 
@@ -1350,6 +1430,10 @@ Returns **404** if no sessions exist, **409 Conflict** if multiple sessions or m
 | `GET /v1/concept-mappings` | `GET /v1/sessions/{id}/models/{mid}/concept-mappings` |
 | `GET /v1/concept-mappings/namespaces` | `GET /v1/sessions/{id}/models/{mid}/concept-mappings/namespaces` |
 | `GET /v1/concept-mappings/unmapped` | `GET /v1/sessions/{id}/models/{mid}/concept-mappings/unmapped` |
+| `GET /v1/rules` | `GET /v1/sessions/{id}/models/{mid}/rules` |
+| `GET /v1/rules/{name}` | `GET /v1/sessions/{id}/models/{mid}/rules/{name}` |
+| `POST /v1/rules/{name}/compile` | `POST /v1/sessions/{id}/models/{mid}/rules/{name}/compile` |
+| `POST /v1/rules/compile` | `POST /v1/sessions/{id}/models/{mid}/rules/compile` |
 | `GET /v1/graph` | `GET /v1/sessions/{id}/models/{mid}/graph` |
 | `POST /v1/sparql` | `POST /v1/sessions/{id}/models/{mid}/sparql` |
 | `POST /v1/query/sql` | `POST /v1/sessions/{id}/query/sql` (auto-resolves model_id) |
