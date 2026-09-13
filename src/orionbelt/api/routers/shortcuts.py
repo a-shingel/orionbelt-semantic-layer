@@ -10,7 +10,6 @@ Returns 409 Conflict if resolution is ambiguous.
 
 from __future__ import annotations
 
-import re
 from typing import Annotated, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -27,6 +26,8 @@ from orionbelt.api.routers.model_api import (
 from orionbelt.api.schema_guards import validate_query_body
 from orionbelt.api.schemas import (
     ComposablesResponse,
+    ConceptMappingListResponse,
+    ConceptNamespacesResponse,
     DiagramResponse,
     DimensionDetail,
     ExampleDetail,
@@ -50,6 +51,7 @@ from orionbelt.api.schemas import (
     SemanticQLRequest,
     SPARQLRequest,
     SPARQLResponse,
+    UnmappedObjectsResponse,
     ValidateRequest,
     ValidateResponse,
 )
@@ -211,21 +213,10 @@ async def shortcut_dimension(
     mgr: SessionManager = Depends(get_session_manager),  # noqa: B008
 ) -> DimensionDetail:
     """Get a dimension by name (auto-resolves session/model)."""
-    _, _, model = _resolve_single_model(mgr)
-    dim = model.dimensions.get(name)
-    if not dim:
-        raise HTTPException(status_code=404, detail=f"Dimension '{name}' not found")
-    return DimensionDetail(
-        name=name,
-        data_object=dim.view,
-        column=dim.column,
-        result_type=dim.result_type.value,
-        time_grain=dim.time_grain.value if dim.time_grain else None,
-        via=dim.via,
-        format=dim.format,
-        owner=dim.owner,
-        synonyms=dim.synonyms,
-    )
+    from orionbelt.api.routers.model_api import get_dimension
+
+    session_id, model_id, _ = _resolve_single_model(mgr)
+    return await get_dimension(session_id, model_id, name, mgr)
 
 
 @router.get("/measures", response_model=list[MeasureDetail], tags=["model-discovery"])
@@ -243,24 +234,10 @@ async def shortcut_measure(
     mgr: SessionManager = Depends(get_session_manager),  # noqa: B008
 ) -> MeasureDetail:
     """Get a measure by name (auto-resolves session/model)."""
-    _, _, model = _resolve_single_model(mgr)
-    m = model.effective_measures.get(name)
-    if not m:
-        raise HTTPException(status_code=404, detail=f"Measure '{name}' not found")
-    return MeasureDetail(
-        name=name,
-        result_type=m.result_type.value,
-        aggregation=m.aggregation,
-        expression=m.expression,
-        columns=[{"dataObject": c.view or "", "column": c.column or ""} for c in m.columns],
-        distinct=m.distinct,
-        total=m.total,
-        description=m.description,
-        format=m.format,
-        data_type=m.data_type,
-        owner=m.owner,
-        synonyms=m.synonyms,
-    )
+    from orionbelt.api.routers.model_api import get_measure
+
+    session_id, model_id, _ = _resolve_single_model(mgr)
+    return await get_measure(session_id, model_id, name, mgr)
 
 
 @router.get("/metrics", response_model=list[MetricDetail], tags=["model-discovery"])
@@ -278,24 +255,10 @@ async def shortcut_metric(
     mgr: SessionManager = Depends(get_session_manager),  # noqa: B008
 ) -> MetricDetail:
     """Get a metric by name (auto-resolves session/model)."""
-    _, _, model = _resolve_single_model(mgr)
-    met = model.metrics.get(name)
-    if not met:
-        raise HTTPException(status_code=404, detail=f"Metric '{name}' not found")
-    component_names = re.findall(r"\{\[([^\]]+)\]\}", met.expression or "")
-    return MetricDetail(
-        name=name,
-        type=met.type.value,
-        expression=met.expression,
-        measure=met.measure,
-        time_dimension=met.time_dimension,
-        component_measures=component_names,
-        description=met.description,
-        format=met.format,
-        data_type=met.data_type,
-        owner=met.owner,
-        synonyms=met.synonyms,
-    )
+    from orionbelt.api.routers.model_api import get_metric
+
+    session_id, model_id, _ = _resolve_single_model(mgr)
+    return await get_metric(session_id, model_id, name, mgr)
 
 
 @router.get("/explain/{name}", response_model=ExplainResponse, tags=["model-discovery"])
@@ -831,6 +794,58 @@ async def shortcut_plan_query(
     body.model_id = model_id
     session_id = _session_id_for_store(mgr, _resolve_store_and_model(mgr)[0])
     return await plan_query(session_id, body, mgr)
+
+
+@router.get(
+    "/concept-mappings",
+    response_model=ConceptMappingListResponse,
+    tags=["model-discovery"],
+)
+async def shortcut_concept_mappings(
+    concept: str | None = None,
+    namespace: str | None = None,
+    relation: str | None = None,
+    types: str | None = None,
+    mgr: SessionManager = Depends(get_session_manager),  # noqa: B008
+) -> ConceptMappingListResponse:
+    """List external concept mappings (auto-resolves session/model)."""
+    from orionbelt.api.routers.model_api import list_concept_mappings
+
+    session_id, model_id, _ = _resolve_single_model(mgr)
+    return await list_concept_mappings(
+        session_id, model_id, concept, namespace, relation, types, mgr
+    )
+
+
+@router.get(
+    "/concept-mappings/namespaces",
+    response_model=ConceptNamespacesResponse,
+    tags=["model-discovery"],
+)
+async def shortcut_concept_namespaces(
+    mgr: SessionManager = Depends(get_session_manager),  # noqa: B008
+) -> ConceptNamespacesResponse:
+    """External namespaces the model links into (auto-resolves session/model)."""
+    from orionbelt.api.routers.model_api import list_concept_namespaces
+
+    session_id, model_id, _ = _resolve_single_model(mgr)
+    return await list_concept_namespaces(session_id, model_id, mgr)
+
+
+@router.get(
+    "/concept-mappings/unmapped",
+    response_model=UnmappedObjectsResponse,
+    tags=["model-discovery"],
+)
+async def shortcut_unmapped_objects(
+    types: str | None = None,
+    mgr: SessionManager = Depends(get_session_manager),  # noqa: B008
+) -> UnmappedObjectsResponse:
+    """Artefacts without an external concept mapping (auto-resolves session/model)."""
+    from orionbelt.api.routers.model_api import list_unmapped_objects
+
+    session_id, model_id, _ = _resolve_single_model(mgr)
+    return await list_unmapped_objects(session_id, model_id, types, mgr)
 
 
 @router.get(
